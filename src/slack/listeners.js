@@ -6,7 +6,7 @@ import {
   workoutEntries,
   pendingEntries,
 } from '../db/schema.js';
-import { eq, and, desc } from 'drizzle-orm';
+import { eq, and, desc, asc, gte } from 'drizzle-orm';
 import { parseMessage } from '../parsing/parseMessage.js';
 import { resolveExercise, normalizeText, toTitleCase } from '../exercises/resolveExercise.js';
 import { recommendWeight } from '../recommendations/recommendWeight.js';
@@ -78,6 +78,14 @@ function fmtDate(date) {
   });
 }
 
+function csvEscape(val) {
+  const str = String(val ?? '');
+  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
 // ── Intent handlers ───────────────────────────────────────────────────────────
 
 async function handleUndo(user, say) {
@@ -124,27 +132,37 @@ async function handleShowHistory(user, parsed, say) {
     return;
   }
 
+  const conditions = [
+    eq(workoutEntries.userId, user.id),
+    eq(workoutEntries.exerciseId, exerciseId),
+  ];
+
+  if (parsed.lookbackDays) {
+    const since = new Date();
+    since.setDate(since.getDate() - parsed.lookbackDays);
+    conditions.push(gte(workoutEntries.performedAt, since));
+  }
+
   const entries = await db
     .select()
     .from(workoutEntries)
-    .where(
-      and(
-        eq(workoutEntries.userId, user.id),
-        eq(workoutEntries.exerciseId, exerciseId),
-      ),
-    )
+    .where(and(...conditions))
     .orderBy(desc(workoutEntries.performedAt))
-    .limit(10);
+    .limit(parsed.lookbackDays ? 100 : 10);
 
   if (entries.length === 0) {
-    await say(`No history found for *${exerciseName}*.`);
+    const rangeNote = parsed.lookbackDays ? ` in the past ${parsed.lookbackDays} days` : '';
+    await say(`No history found for *${exerciseName}*${rangeNote}.`);
     return;
   }
 
   const lines = entries.map(
-    (e) => `• ${fmtDate(e.performedAt)}: ${parseFloat(e.weight)} ${e.unit} × ${e.reps}`,
+    (e) => `• ${fmtDate(e.performedAt)}: ${parseFloat(e.weight)} ${e.unit} × ${e.reps}${e.tempo ? ` @ ${e.tempo}` : ''}`,
   );
-  await say(`*${exerciseName}* — recent entries:\n${lines.join('\n')}`);
+  const header = parsed.lookbackDays
+    ? `*${exerciseName}* — past ${parsed.lookbackDays} days (${entries.length} entries):`
+    : `*${exerciseName}* — recent entries:`;
+  await say(`${header}\n${lines.join('\n')}`);
 }
 
 async function handleRecommend(user, parsed, say) {
@@ -157,21 +175,35 @@ async function handleRecommend(user, parsed, say) {
 
   const { exercise } = resolution;
   const targetReps = parsed.targetReps ?? 10;
-  const rec = await recommendWeight(user.id, exercise.id, targetReps, user.defaultUnit);
+  const targetSets = parsed.targetSets ?? 1;
+  const tempoOverride = parsed.targetTempo !== null ? parsed.targetTempo : undefined;
+  const rec = await recommendWeight(user.id, exercise.id, targetReps, targetSets, user.defaultUnit, tempoOverride);
 
   if (!rec) {
     await say(`No entries found for *${exercise.canonicalName}*. Log some sets first.`);
     return;
   }
 
+  const tempoNote = rec.targetTempo ? ` at ${rec.targetTempo} tempo` : '';
+
   const based = rec.sourcedFrom
-    .map((s) => `• ${fmtDate(s.date)}: ${s.weight} ${s.unit} × ${s.reps}`)
+    .map((s) => `• ${fmtDate(s.date)}: ${s.weight} ${s.unit} × ${s.reps}${s.tempo ? ` @ ${s.tempo}` : ''}`)
     .join('\n');
 
+  let recommendation;
+  if (rec.sets.length === 1) {
+    recommendation = `I'd suggest *${rec.sets[0].weight} ${rec.unit}* for ${rec.targetReps} reps${tempoNote}.`;
+  } else {
+    const setLines = rec.sets
+      .map((s) => `• Set ${s.setNumber} (${s.label}): *${s.weight} ${s.unit}*`)
+      .join('\n');
+    recommendation = `Here's your *${exercise.canonicalName}* plan for ${rec.targetSets}×${rec.targetReps}${tempoNote}:\n${setLines}`;
+  }
+
   await say(
-    `I'd start around *${rec.recommendedLow}–${rec.recommendedHigh} ${rec.unit}* for ${rec.targetReps} reps.\n\n` +
+    `${recommendation}\n\n` +
       `Based on:\n${based}\n\n` +
-      `That puts your estimated 1RM around *${rec.estimated1RM} ${rec.unit}*.`,
+      `Estimated 1RM: ~*${rec.estimated1RM} ${rec.unit}*`,
   );
 }
 
@@ -243,6 +275,40 @@ async function handleLogLift(user, parsed, rawMessage, say) {
   });
 }
 
+async function handleExportData(user, message, client, say) {
+  const entries = await db
+    .select({
+      performedAt: workoutEntries.performedAt,
+      exercise: exercises.canonicalName,
+      weight: workoutEntries.weight,
+      unit: workoutEntries.unit,
+      reps: workoutEntries.reps,
+      tempo: workoutEntries.tempo,
+    })
+    .from(workoutEntries)
+    .innerJoin(exercises, eq(workoutEntries.exerciseId, exercises.id))
+    .where(eq(workoutEntries.userId, user.id))
+    .orderBy(asc(workoutEntries.performedAt));
+
+  if (entries.length === 0) {
+    await say("You don't have any logged lifts yet.");
+    return;
+  }
+
+  const rows = entries.map((e) => {
+    const date = new Date(e.performedAt).toISOString().split('T')[0];
+    return [date, csvEscape(e.exercise), parseFloat(e.weight), e.unit, e.reps, e.tempo ?? ''].join(',');
+  });
+  const csv = `date,exercise,weight,unit,reps,tempo\n${rows.join('\n')}`;
+
+  await client.filesUploadV2({
+    channel_id: message.channel,
+    filename: 'gymlog-export.csv',
+    content: csv,
+    initial_comment: `Here are all your lift records (${entries.length} entries).`,
+  });
+}
+
 // ── Button action handler ─────────────────────────────────────────────────────
 
 async function handleResolveAction(action, body, respond) {
@@ -304,7 +370,7 @@ async function handleResolveAction(action, body, respond) {
 // ── Registration ──────────────────────────────────────────────────────────────
 
 export function registerListeners(app) {
-  app.message(async ({ message, say }) => {
+  app.message(async ({ message, say, client }) => {
     console.log('[debug] message received:', JSON.stringify({ subtype: message.subtype, channel_type: message.channel_type, text: message.text }));
     if (message.subtype) return;
     if (message.channel_type !== 'im') return;
@@ -319,13 +385,15 @@ export function registerListeners(app) {
     if (parsed.intent === 'show_history') return handleShowHistory(user, parsed, say);
     if (parsed.intent === 'recommend_weight') return handleRecommend(user, parsed, say);
     if (parsed.intent === 'log_lift') return handleLogLift(user, parsed, text, say);
+    if (parsed.intent === 'export_data') return handleExportData(user, message, client, say);
 
     await say(
       "I didn't understand that. Try:\n" +
         '• `bench press 215x3`\n' +
         '• `what should I bench for 10 reps?`\n' +
-        '• `show recent bench`\n' +
-        '• `undo`',
+        '• `show recent bench` or `show deadlifts over the past year`\n' +
+        '• `undo`\n' +
+        '• `export my data`',
     );
   });
 
