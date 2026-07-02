@@ -7,6 +7,7 @@ import {
   timestamp,
   jsonb,
   unique,
+  boolean,
 } from 'drizzle-orm/pg-core';
 
 // entry_type values: 'set' | 'challenge'
@@ -61,6 +62,18 @@ export const workoutEntries = pgTable('workout_entries', {
   entryType: text('entry_type').notNull().default('set'),
   durationMinutes: numeric('duration_minutes', { precision: 6, scale: 2 }),
   performedAt: timestamp('performed_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const reminderSchedules = pgTable('reminder_schedules', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id')
+    .notNull()
+    .references(() => users.id),
+  daysOfWeek: jsonb('days_of_week').notNull(), // array of 0-6 (0=Sun)
+  hour: integer('hour').notNull(),             // 0-23 in user's timezone
+  minute: integer('minute').notNull().default(0),
+  enabled: boolean('enabled').notNull().default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 

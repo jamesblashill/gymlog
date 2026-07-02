@@ -5,6 +5,7 @@ import {
   exerciseAliases,
   workoutEntries,
   pendingEntries,
+  reminderSchedules,
 } from '../db/schema.js';
 import { eq, and, desc, asc, gte } from 'drizzle-orm';
 import { parseMessage } from '../parsing/parseMessage.js';
@@ -415,6 +416,66 @@ async function handleExportData(user, message, client, say) {
   });
 }
 
+// ── Reminder helpers ──────────────────────────────────────────────────────────
+
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function fmtReminderTime(hour, minute) {
+  const ampm = hour >= 12 ? 'pm' : 'am';
+  const h = hour % 12 || 12;
+  const m = minute > 0 ? `:${String(minute).padStart(2, '0')}` : '';
+  return `${h}${m}${ampm}`;
+}
+
+function fmtReminderDays(daysOfWeek) {
+  if (daysOfWeek.length === 7) return 'every day';
+  const sorted = [...daysOfWeek].sort((a, b) => a - b);
+  return sorted.map((d) => DAY_NAMES[d]).join('/');
+}
+
+async function handleSetReminder(user, parsed, say) {
+  await db.delete(reminderSchedules).where(eq(reminderSchedules.userId, user.id));
+  await db.insert(reminderSchedules).values({
+    userId: user.id,
+    daysOfWeek: parsed.daysOfWeek,
+    hour: parsed.hour,
+    minute: parsed.minute,
+  });
+  const days = fmtReminderDays(parsed.daysOfWeek);
+  const time = fmtReminderTime(parsed.hour, parsed.minute);
+  const tz = user.timezone !== 'UTC' ? ` (${user.timezone})` : '';
+  await say(`Got it! I'll remind you *${days} at ${time}*${tz} to log your workout.`);
+}
+
+async function handleClearReminder(user, say) {
+  const result = await db.delete(reminderSchedules).where(eq(reminderSchedules.userId, user.id)).returning();
+  if (result.length === 0) {
+    await say("You don't have any reminders set.");
+  } else {
+    await say('Reminders cleared.');
+  }
+}
+
+async function handleShowReminders(user, say) {
+  const schedules = await db
+    .select()
+    .from(reminderSchedules)
+    .where(eq(reminderSchedules.userId, user.id));
+
+  if (schedules.length === 0) {
+    await say("You don't have any reminders set. Try: _remind me Mon/Wed/Fri at 5pm_");
+    return;
+  }
+
+  const tz = user.timezone !== 'UTC' ? ` (${user.timezone})` : '';
+  const lines = schedules.map((s) => {
+    const days = fmtReminderDays(s.daysOfWeek);
+    const time = fmtReminderTime(s.hour, s.minute);
+    return `• *${days}* at *${time}*${tz}`;
+  });
+  await say(`Your workout reminders:\n${lines.join('\n')}`);
+}
+
 // ── Button action handler ─────────────────────────────────────────────────────
 
 async function handleResolveAction(action, body, respond) {
@@ -489,29 +550,44 @@ export function registerListeners(app) {
     const text = message.text?.trim();
     if (!text) return;
 
-    const user = await getOrCreateUser(message.user);
-    const parsed = await parseMessage(text, user.timezone);
+    try {
+      const user = await getOrCreateUser(message.user);
+      const parsed = await parseMessage(text, user.timezone);
 
-    if (parsed.intent === 'undo') return handleUndo(user, say);
-    if (parsed.intent === 'show_history') return handleShowHistory(user, parsed, say);
-    if (parsed.intent === 'recommend_weight') return handleRecommend(user, parsed, say);
-    if (parsed.intent === 'log_lift') return handleLogLift(user, parsed, text, say);
-    if (parsed.intent === 'log_challenge') return handleLogChallenge(user, parsed, text, say);
-    if (parsed.intent === 'export_data') return handleExportData(user, message, client, say);
+      if (parsed.intent === 'undo') return await handleUndo(user, say);
+      if (parsed.intent === 'show_history') return await handleShowHistory(user, parsed, say);
+      if (parsed.intent === 'recommend_weight') return await handleRecommend(user, parsed, say);
+      if (parsed.intent === 'log_lift') return await handleLogLift(user, parsed, text, say);
+      if (parsed.intent === 'log_challenge') return await handleLogChallenge(user, parsed, text, say);
+      if (parsed.intent === 'export_data') return await handleExportData(user, message, client, say);
+      if (parsed.intent === 'set_reminder') return await handleSetReminder(user, parsed, say);
+      if (parsed.intent === 'clear_reminder') return await handleClearReminder(user, say);
+      if (parsed.intent === 'show_reminders') return await handleShowReminders(user, say);
 
-    await say(
-      "I didn't understand that. Try:\n" +
-        '• `bench press 215x3`\n' +
-        '• `what should I bench for 10 reps?`\n' +
-        '• `show recent bench` or `show deadlifts over the past year`\n' +
-        '• `82 pushups for 100 pushup challenge` or `100 pushup challenge in 11:30`\n' +
-        '• `undo`\n' +
-        '• `export my data`',
-    );
+      await say(
+        "I didn't understand that. Try:\n" +
+          '• `bench press 215x3`\n' +
+          '• `what should I bench for 10 reps?`\n' +
+          '• `show recent bench` or `show deadlifts over the past year`\n' +
+          '• `82 pushups for 100 pushup challenge` or `100 pushup challenge in 11:30`\n' +
+          '• `undo`\n' +
+          '• `export my data`\n' +
+          '• `remind me Mon/Wed/Fri at 5pm`\n' +
+          '• `show my reminders` or `clear reminders`',
+      );
+    } catch (err) {
+      console.error('[error] message handler:', err);
+      await say('Sorry, something went wrong. Please try again.');
+    }
   });
 
   app.action(/^gym_resolve_/, async ({ action, ack, body, respond }) => {
     await ack();
-    await handleResolveAction(action, body, respond);
+    try {
+      await handleResolveAction(action, body, respond);
+    } catch (err) {
+      console.error('[error] resolve action:', err);
+      await respond({ replace_original: false, text: 'Sorry, something went wrong. Please try again.' });
+    }
   });
 }

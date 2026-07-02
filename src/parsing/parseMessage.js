@@ -45,6 +45,24 @@ Intent types and their schemas:
   "intent": "export_data"
 }
 
+"set_reminder" — user wants to be reminded to log workouts on a schedule:
+{
+  "intent": "set_reminder",
+  "days_of_week": number[],  // 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
+  "hour": number,            // 0-23 in the user's local time
+  "minute": number           // 0-59
+}
+
+"clear_reminder" — user wants to remove their workout reminders:
+{
+  "intent": "clear_reminder"
+}
+
+"show_reminders" — user wants to see their current reminder schedule:
+{
+  "intent": "show_reminders"
+}
+
 "log_challenge" — user logged a challenge result (no weight; total reps, time, or both):
 {
   "intent": "log_challenge",
@@ -78,6 +96,11 @@ Parsing rules:
 - lookback_days is null when no time range is mentioned (show most recent entries).
 - "undo" or "delete last" → undo.
 - "export my data", "download my lifts", "give me a CSV", "export records" → export_data.
+- "remind me Tues/Thur @ 5pm to record my results" → set_reminder, days_of_week=[2,4], hour=17, minute=0.
+- "set a reminder Mon/Wed/Fri at 6:30am" → set_reminder, days_of_week=[1,3,5], hour=6, minute=30.
+- "remind me every day at noon" → set_reminder, days_of_week=[0,1,2,3,4,5,6], hour=12, minute=0.
+- "cancel my reminders", "clear reminders", "stop reminding me" → clear_reminder.
+- "what are my reminders", "show my reminders", "do I have any reminders" → show_reminders.
 - log_challenge is for workouts where weight is irrelevant: push-up challenges, run/row distances, timed efforts, etc.
 - "82 pushups for 100 pushup challenge" → log_challenge, exercise="100 pushup challenge", total_count=82, duration_minutes=null.
 - "completed 100 pushup challenge in 11:30" → log_challenge, exercise="100 pushup challenge", total_count=100, duration_minutes=11.5.
@@ -206,6 +229,26 @@ function validate(parsed) {
   if (intent === 'undo') return { intent: 'undo' };
 
   if (intent === 'export_data') return { intent: 'export_data' };
+
+  if (intent === 'set_reminder') {
+    const days = parsed.days_of_week;
+    const hour = parsed.hour;
+    const minute = parsed.minute;
+    if (
+      !Array.isArray(days) ||
+      days.length === 0 ||
+      !days.every((d) => Number.isInteger(d) && d >= 0 && d <= 6) ||
+      !Number.isInteger(hour) || hour < 0 || hour > 23 ||
+      !Number.isInteger(minute) || minute < 0 || minute > 59
+    ) {
+      return { intent: 'unknown' };
+    }
+    return { intent: 'set_reminder', daysOfWeek: days, hour, minute };
+  }
+
+  if (intent === 'clear_reminder') return { intent: 'clear_reminder' };
+
+  if (intent === 'show_reminders') return { intent: 'show_reminders' };
 
   return { intent: 'unknown' };
 }
