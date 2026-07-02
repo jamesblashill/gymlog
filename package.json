@@ -1,0 +1,21 @@
+{
+  "name": "gymlog",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/app.js",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node src/db/migrate.js",
+    "db:push": "drizzle-kit push"
+  },
+  "dependencies": {
+    "@slack/bolt": "^3.21.1",
+    "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.44.0",
+    "openai": "^4.103.0",
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.30.0"
+  }
+}
