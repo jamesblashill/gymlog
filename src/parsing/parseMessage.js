@@ -13,7 +13,7 @@ Intent types and their schemas:
   "intent": "log_lift",
   "exercise": string,
   "weight": number,
-  "reps": number,
+  "reps": number | null,
   "unit": "lb" | "kg",
   "tempo": string | null,
   "date": "YYYY-MM-DD" | null
@@ -72,6 +72,14 @@ Intent types and their schemas:
   "date": "YYYY-MM-DD" | null
 }
 
+"set_weekly_program" — coach is defining this week's exercise list (e.g. "This week's strength exercises:", "Weekly program:", "This week we're doing:"):
+{
+  "intent": "set_weekly_program",
+  "exercises": [
+    { "name": string, "target_reps": number | null, "tempo": string | null }
+  ]
+}
+
 "unknown" — none of the above:
 {
   "intent": "unknown"
@@ -80,7 +88,8 @@ Intent types and their schemas:
 Parsing rules:
 - Default unit is "lb" unless "kg" or "kilos" appears or context is clearly metric.
 - date is null when no date is mentioned (means today).
-- weight and reps must be positive numbers; reps must be a whole number.
+- weight must be a positive number; reps must be a positive whole number, or null if the user didn't specify reps (e.g. "Squats @ 70lbs" with no rep count).
+- reps is null when the user mentions weight but no reps — don't guess or invent reps.
 - "215x3" means weight=215, reps=3.
 - "3 reps @ 215" means weight=215, reps=3.
 - tempo is a 4-digit string like "30x0" representing eccentric/pause-at-bottom/concentric/pause-at-top seconds; "x" means explosive. Extract it as-is when present, otherwise null.
@@ -110,7 +119,12 @@ Parsing rules:
 - total_count is a whole number of reps/meters/etc; null when only time is recorded.
 - At least one of total_count or duration_minutes must be non-null for log_challenge.
 - Use log_lift (not log_challenge) whenever weight is mentioned or clearly implied.
+- set_weekly_program is for messages that define this week's exercise list. Extract each line as an exercise with optional target reps and tempo.
+  "BB Hip Thrust x10 @30x3" → name="BB Hip Thrust", target_reps=10, tempo="30x3"
+  "1-1/4 Cyclist Squat x8" → name="1-1/4 Cyclist Squat", target_reps=8, tempo=null
+  "Romanian Deadlift" → name="Romanian Deadlift", target_reps=null, tempo=null
 `;
+
 
 export async function parseMessage(text, userTimezone = 'UTC') {
   const today = new Date().toISOString().split('T')[0];
@@ -144,14 +158,15 @@ function validate(parsed) {
   const { intent } = parsed;
 
   if (intent === 'log_lift') {
+    const reps =
+      typeof parsed.reps === 'number' && parsed.reps > 0 && Number.isInteger(parsed.reps)
+        ? parsed.reps
+        : null;
     if (
       typeof parsed.exercise !== 'string' ||
       !parsed.exercise.trim() ||
       typeof parsed.weight !== 'number' ||
       parsed.weight <= 0 ||
-      typeof parsed.reps !== 'number' ||
-      parsed.reps <= 0 ||
-      !Number.isInteger(parsed.reps) ||
       !['lb', 'kg'].includes(parsed.unit)
     ) {
       return { intent: 'unknown' };
@@ -160,7 +175,7 @@ function validate(parsed) {
       intent: 'log_lift',
       exercise: parsed.exercise.trim(),
       weight: parsed.weight,
-      reps: parsed.reps,
+      reps,
       unit: parsed.unit,
       tempo: typeof parsed.tempo === 'string' && parsed.tempo.trim() ? parsed.tempo.trim() : null,
       date: typeof parsed.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date)
@@ -224,6 +239,24 @@ function validate(parsed) {
         ? parsed.date
         : null,
     };
+  }
+
+  if (intent === 'set_weekly_program') {
+    if (!Array.isArray(parsed.exercises) || parsed.exercises.length === 0) {
+      return { intent: 'unknown' };
+    }
+    const exercises = parsed.exercises
+      .map((e) => ({
+        name: typeof e.name === 'string' ? e.name.trim() : '',
+        targetReps:
+          typeof e.target_reps === 'number' && Number.isInteger(e.target_reps) && e.target_reps > 0
+            ? e.target_reps
+            : null,
+        tempo: typeof e.tempo === 'string' && e.tempo.trim() ? e.tempo.trim() : null,
+      }))
+      .filter((e) => e.name.length > 0);
+    if (exercises.length === 0) return { intent: 'unknown' };
+    return { intent: 'set_weekly_program', exercises };
   }
 
   if (intent === 'undo') return { intent: 'undo' };

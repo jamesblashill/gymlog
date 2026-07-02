@@ -17,6 +17,7 @@ export const users = pgTable('users', {
   slackUserId: text('slack_user_id').notNull().unique(),
   defaultUnit: text('default_unit').notNull().default('lb'),
   timezone: text('timezone').notNull().default('UTC'),
+  isCoach: boolean('is_coach').notNull().default(false),
 });
 
 export const exercises = pgTable('exercises', {
@@ -74,6 +75,23 @@ export const reminderSchedules = pgTable('reminder_schedules', {
   hour: integer('hour').notNull(),             // 0-23 in user's timezone
   minute: integer('minute').notNull().default(0),
   enabled: boolean('enabled').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const weeklyPrograms = pgTable('weekly_programs', {
+  id: serial('id').primaryKey(),
+  coachUserId: integer('coach_user_id').notNull().references(() => users.id),
+  weekStartDate: text('week_start_date').notNull(), // 'YYYY-MM-DD' (Monday of the week)
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const weeklyProgramExercises = pgTable('weekly_program_exercises', {
+  id: serial('id').primaryKey(),
+  programId: integer('program_id').notNull().references(() => weeklyPrograms.id),
+  exerciseName: text('exercise_name').notNull(),
+  targetReps: integer('target_reps'),
+  tempo: text('tempo'),
+  displayOrder: integer('display_order').notNull().default(0),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 

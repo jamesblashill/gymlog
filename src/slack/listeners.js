@@ -11,6 +11,7 @@ import { eq, and, desc, asc, gte } from 'drizzle-orm';
 import { parseMessage } from '../parsing/parseMessage.js';
 import { resolveExercise, normalizeText, toTitleCase } from '../exercises/resolveExercise.js';
 import { recommendWeight } from '../recommendations/recommendWeight.js';
+import { saveWeeklyProgram, getActiveWeeklyProgram, matchToWeeklyProgram } from '../exercises/weeklyProgram.js';
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
 
@@ -310,35 +311,57 @@ async function handleLogChallenge(user, parsed, rawMessage, say) {
 }
 
 async function handleLogLift(user, parsed, rawMessage, say) {
-  const resolution = await resolveExercise(parsed.exercise, user.id);
+  let effectiveParsed = { ...parsed };
+
+  // Check weekly program — try to match user's exercise text to a programmed exercise
+  const weeklyProgram = await getActiveWeeklyProgram();
+  if (weeklyProgram && weeklyProgram.exercises.length > 0) {
+    const programMatch = await matchToWeeklyProgram(parsed.exercise, weeklyProgram.exercises);
+    if (programMatch) {
+      effectiveParsed = {
+        ...effectiveParsed,
+        exercise: programMatch.exerciseName,
+        reps: effectiveParsed.reps ?? programMatch.targetReps,
+        tempo: effectiveParsed.tempo ?? programMatch.tempo,
+      };
+    }
+  }
+
+  // If reps still unknown after program lookup, ask the user
+  if (!effectiveParsed.reps) {
+    await say(`How many reps? Try: \`${parsed.exercise} ${parsed.weight}${parsed.unit}x8\``);
+    return;
+  }
+
+  const resolution = await resolveExercise(effectiveParsed.exercise, user.id);
 
   if (resolution.action === 'match_existing') {
     const { exercise } = resolution;
-    await upsertAlias(exercise.id, user.id, parsed.exercise);
-    await saveEntry(user.id, exercise.id, parsed, rawMessage);
-    await say(`Logged: *${exercise.canonicalName}* — ${parsed.weight} ${parsed.unit} × ${parsed.reps}${parsed.tempo ? ` @ ${parsed.tempo}` : ''}`);
+    await upsertAlias(exercise.id, user.id, effectiveParsed.exercise);
+    await saveEntry(user.id, exercise.id, effectiveParsed, rawMessage);
+    await say(`Logged: *${exercise.canonicalName}* — ${effectiveParsed.weight} ${effectiveParsed.unit} × ${effectiveParsed.reps}${effectiveParsed.tempo ? ` @ ${effectiveParsed.tempo}` : ''}`);
     return;
   }
 
   if (resolution.action === 'create_new') {
-    const exercise = await createExerciseWithAlias(user.id, resolution.canonicalName, parsed.exercise);
-    await saveEntry(user.id, exercise.id, parsed, rawMessage);
-    await say(`Logged: *${resolution.canonicalName}* — ${parsed.weight} ${parsed.unit} × ${parsed.reps}${parsed.tempo ? ` @ ${parsed.tempo}` : ''}`);
+    const exercise = await createExerciseWithAlias(user.id, resolution.canonicalName, effectiveParsed.exercise);
+    await saveEntry(user.id, exercise.id, effectiveParsed, rawMessage);
+    await say(`Logged: *${resolution.canonicalName}* — ${effectiveParsed.weight} ${effectiveParsed.unit} × ${effectiveParsed.reps}${effectiveParsed.tempo ? ` @ ${effectiveParsed.tempo}` : ''}`);
     return;
   }
 
   // ask_user — save pending entry and show buttons
-  const performedAt = parsed.date ? new Date(parsed.date) : new Date();
+  const performedAt = effectiveParsed.date ? new Date(effectiveParsed.date) : new Date();
   const [pending] = await db
     .insert(pendingEntries)
     .values({
       userId: user.id,
       rawMessage,
-      rawExerciseText: parsed.exercise,
-      weight: String(parsed.weight),
-      reps: parsed.reps,
-      unit: parsed.unit,
-      tempo: parsed.tempo ?? null,
+      rawExerciseText: effectiveParsed.exercise,
+      weight: String(effectiveParsed.weight),
+      reps: effectiveParsed.reps,
+      unit: effectiveParsed.unit,
+      tempo: effectiveParsed.tempo ?? null,
       performedAt,
       candidateMatches: resolution.candidates.map((c) => ({ id: c.id, name: c.canonicalName })),
     })
@@ -353,20 +376,20 @@ async function handleLogLift(user, parsed, rawMessage, say) {
 
   const createButton = {
     type: 'button',
-    text: { type: 'plain_text', text: `New: "${toTitleCase(parsed.exercise)}"` },
+    text: { type: 'plain_text', text: `New: "${toTitleCase(effectiveParsed.exercise)}"` },
     action_id: 'gym_resolve_create',
     value: JSON.stringify({ pendingId: pending.id }),
     style: 'primary',
   };
 
   await say({
-    text: `Which exercise is "${parsed.exercise}"?`,
+    text: `Which exercise is "${effectiveParsed.exercise}"?`,
     blocks: [
       {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `Which exercise is *"${parsed.exercise}"*?\n_${parsed.weight} ${parsed.unit} × ${parsed.reps}${parsed.tempo ? ` @ ${parsed.tempo}` : ''}_`,
+          text: `Which exercise is *"${effectiveParsed.exercise}"*?\n_${effectiveParsed.weight} ${effectiveParsed.unit} × ${effectiveParsed.reps}${effectiveParsed.tempo ? ` @ ${effectiveParsed.tempo}` : ''}_`,
         },
       },
       {
@@ -375,6 +398,42 @@ async function handleLogLift(user, parsed, rawMessage, say) {
       },
     ],
   });
+}
+
+async function handleSetWeeklyProgram(user, parsed, say) {
+  if (!user.isCoach) {
+    await say("Only coaches can set the weekly program. Ask your coach to set this up.");
+    return;
+  }
+
+  const program = await saveWeeklyProgram(user.id, parsed.exercises);
+
+  const lines = program.exercises.map((e) => {
+    let line = `• *${e.exerciseName}*`;
+    if (e.targetReps) line += ` — ${e.targetReps} reps`;
+    if (e.tempo) line += ` @ ${e.tempo}`;
+    return line;
+  });
+
+  await say(`This week's program is set! Members can now log any of these by name:\n${lines.join('\n')}`);
+}
+
+async function handleShowWeeklyProgram(say) {
+  const program = await getActiveWeeklyProgram();
+
+  if (!program || program.exercises.length === 0) {
+    await say("No program set for this week yet.");
+    return;
+  }
+
+  const lines = program.exercises.map((e) => {
+    let line = `• *${e.exerciseName}*`;
+    if (e.targetReps) line += ` — ${e.targetReps} reps`;
+    if (e.tempo) line += ` @ ${e.tempo}`;
+    return line;
+  });
+
+  await say(`This week's strength program:\n${lines.join('\n')}`);
 }
 
 async function handleExportData(user, message, client, say) {
@@ -563,6 +622,12 @@ export function registerListeners(app) {
       if (parsed.intent === 'set_reminder') return await handleSetReminder(user, parsed, say);
       if (parsed.intent === 'clear_reminder') return await handleClearReminder(user, say);
       if (parsed.intent === 'show_reminders') return await handleShowReminders(user, say);
+      if (parsed.intent === 'set_weekly_program') return await handleSetWeeklyProgram(user, parsed, say);
+
+      // Check for "show this week's program" before the generic unknown response
+      if (/this week.{0,20}program|weekly program|what.{0,20}(program|exercises this week)/i.test(text)) {
+        return await handleShowWeeklyProgram(say);
+      }
 
       await say(
         "I didn't understand that. Try:\n" +
@@ -573,7 +638,8 @@ export function registerListeners(app) {
           '• `undo`\n' +
           '• `export my data`\n' +
           '• `remind me Mon/Wed/Fri at 5pm`\n' +
-          '• `show my reminders` or `clear reminders`',
+          '• `show my reminders` or `clear reminders`\n' +
+          '• `what\'s this week\'s program?`',
       );
     } catch (err) {
       console.error('[error] message handler:', err);
