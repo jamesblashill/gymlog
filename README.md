@@ -1,148 +1,48 @@
 # GymLog
 
-Slack DM bot for logging gym lifts and getting weight recommendations.
+A Slack bot that acts as your personal lifting coach. DM it to log workouts, get weight recommendations, and track your progress — no app to install, no account to create.
 
-## Stack
+## Logging lifts
 
-- **Node.js** — plain ESM, no build step
-- **Slack Bolt** — Socket Mode
-- **Postgres + Drizzle ORM**
-- **OpenAI** (`gpt-4o-mini`) — message parsing and exercise resolution
+Send a DM in natural language. The bot understands many ways to say the same thing:
 
-## Setup
-
-### 1. Create the Slack app
-
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create App** → **From Manifest**
-2. Paste the contents of `slack-manifest.yml`
-3. Under **Basic Information → App-Level Tokens**, generate a token with the `connections:write` scope — this is your `SLACK_APP_TOKEN`
-4. Install the app to your workspace
-
-### 2. Configure environment
-
-```bash
-cp .env.example .env
-```
-
-Fill in all values:
-
-| Variable | Where to find it |
+| Example | What happens |
 |---|---|
-| `SLACK_BOT_TOKEN` | OAuth & Permissions → Bot User OAuth Token (`xoxb-…`) |
-| `SLACK_APP_TOKEN` | Basic Information → App-Level Tokens (`xapp-…`) |
-| `SLACK_SIGNING_SECRET` | Basic Information → Signing Secret |
-| `DATABASE_URL` | Your Postgres connection string |
-| `OPENAI_API_KEY` | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| `bench press 215x3` | Logs 215 lb × 3 reps |
+| `bench press for 3 reps @ 215` | Same thing, different phrasing |
+| `Feb 19 bench press for 3 reps @ 215` | Log with a specific date |
+| `incline db curl 35x12` | Creates a new exercise if it doesn't exist yet |
 
-### 3. Set up the database
+## Weight recommendations
 
-```bash
-# Development — push schema directly (no migration files)
-npm run db:push
+Ask for a recommendation and the bot calculates a target weight based on your recent history using the Epley formula across your last 5 entries.
 
-# Production — generate SQL files, then apply
-npm run db:generate
-npm run db:migrate
-```
+| Example |
+|---|
+| `what should I bench for 10 reps?` |
+| `what weight should I pick for bench press for 10 reps?` |
 
-### 4. Run
+Results are rounded to the nearest 5 lb / 2.5 kg and given as a small range.
 
-```bash
-npm start
-```
+## Viewing history
 
-## Local development with Docker
-
-`docker-compose.yml` runs Postgres locally so you don't need to install it yourself. The app and all commands run from your own terminal.
-
-### Prerequisites
-
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker Engine + Compose plugin)
-
-### Setup
-
-1. Start the database:
-
-   ```bash
-   docker compose up -d
-   ```
-
-2. Set `DATABASE_URL` in your `.env` to:
-
-   ```
-   DATABASE_URL=postgresql://gymlog:gymlog@localhost:5432/gymlog
-   ```
-
-3. Push the schema and start the app as normal:
-
-   ```bash
-   npm run db:push
-   npm start
-   ```
-
-### Useful commands
-
-```bash
-# Stop the database, keep the volume
-docker compose down
-
-# Stop and wipe all data
-docker compose down -v
-```
-
-## Usage
-
-Send a DM to the app. Supported messages:
-
-| Example | Intent |
+| Example | What it shows |
 |---|---|
-| `bench press 215x3` | Log a lift |
-| `bench press for 3 reps @ 215` | Log a lift |
-| `Feb 19 bench press for 3 reps @ 215` | Log a lift with date |
-| `what should I bench for 10 reps?` | Get a recommendation |
-| `what weight should I pick for bench press for 10 reps?` | Get a recommendation |
-| `show recent bench` | View history |
-| `undo` / `delete last` | Remove last entry |
+| `show recent bench` | Your last several bench press entries |
 
-When an exercise is ambiguous, the bot sends buttons to pick an existing exercise or create a new one. Your choice is remembered as an alias so you won't be asked again.
+## Undoing entries
 
-## How exercise resolution works
+| Example |
+|---|
+| `undo` |
+| `delete last` |
 
-1. Normalize the raw text and check the `exercise_aliases` table for an exact match.
-2. On a miss, send the text + all your existing exercises to the LLM resolver.
-3. The resolver returns one of:
-   - `match_existing` — wording is the same exercise (e.g. "bench" → "Bench Press")
-   - `create_new` — clearly different equipment/angle/grip (e.g. "incline bench press")
-   - `ask_user` — genuinely ambiguous; bot shows buttons
+## Smart exercise matching
 
-## How recommendations work
+You don't have to type exercise names exactly the same way every time. When you log a lift, GymLog checks if the exercise name matches something you've logged before — it'll map `"bench"` to `"Bench Press"` automatically.
 
-Uses the **Epley formula** across your last 5 entries for that exercise:
+When a name is genuinely ambiguous (e.g. you have both "Bench Press" and "Close Grip Bench Press"), the bot sends you buttons to pick which one you meant. Your choice is saved as an alias so you won't be asked again.
 
-```
-estimated_1RM = weight × (1 + reps / 30)
-target_weight = avg_1RM / (1 + target_reps / 30)
-```
+---
 
-Result is rounded to the nearest 5 lb or 2.5 kg and presented as a 5 lb / 2.5 kg range.
-
-## Project structure
-
-```
-src/
-  app.js                      Entry point
-  db/
-    schema.js                 Drizzle table definitions
-    index.js                  DB client
-    migrate.js                Migration runner
-  parsing/
-    parseMessage.js           Intent + data extraction (OpenAI)
-  exercises/
-    resolveExercise.js        Alias lookup + LLM resolver
-  recommendations/
-    recommendWeight.js        Epley formula logic
-  slack/
-    listeners.js              Message + button action handlers
-drizzle.config.js
-slack-manifest.yml
-```
+[Development setup →](DEVELOPMENT.md)
