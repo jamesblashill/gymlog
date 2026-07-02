@@ -9,6 +9,8 @@ import {
   unique,
 } from 'drizzle-orm/pg-core';
 
+// entry_type values: 'set' | 'challenge'
+
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
   slackUserId: text('slack_user_id').notNull().unique(),
@@ -56,6 +58,8 @@ export const workoutEntries = pgTable('workout_entries', {
   reps: integer('reps').notNull(),
   unit: text('unit').notNull(),
   tempo: text('tempo'),
+  entryType: text('entry_type').notNull().default('set'),
+  durationMinutes: numeric('duration_minutes', { precision: 6, scale: 2 }),
   performedAt: timestamp('performed_at').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
@@ -72,6 +76,8 @@ export const pendingEntries = pgTable('pending_entries', {
   reps: integer('reps').notNull(),
   unit: text('unit').notNull(),
   tempo: text('tempo'),
+  entryType: text('entry_type').notNull().default('set'),
+  durationMinutes: numeric('duration_minutes', { precision: 6, scale: 2 }),
   performedAt: timestamp('performed_at').notNull(),
   candidateMatches: jsonb('candidate_matches').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),

@@ -49,7 +49,7 @@ async function upsertAlias(exerciseId, userId, rawText) {
     .onConflictDoNothing();
 }
 
-async function saveEntry(userId, exerciseId, { exercise, weight, reps, unit, tempo, date }, rawMessage) {
+async function saveEntry(userId, exerciseId, { exercise, weight, reps, unit, tempo, date, entryType, durationMinutes }, rawMessage) {
   const performedAt = date ? new Date(date) : new Date();
   const [entry] = await db
     .insert(workoutEntries)
@@ -62,6 +62,8 @@ async function saveEntry(userId, exerciseId, { exercise, weight, reps, unit, tem
       reps,
       unit,
       tempo: tempo ?? null,
+      entryType: entryType ?? 'set',
+      durationMinutes: durationMinutes != null ? String(durationMinutes) : null,
       performedAt,
     })
     .returning();
@@ -76,6 +78,19 @@ function fmtDate(date) {
     day: 'numeric',
     timeZone: 'UTC',
   });
+}
+
+function fmtDuration(minutes) {
+  const m = Math.floor(Number(minutes));
+  const s = Math.round((Number(minutes) - m) * 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function fmtChallenge(e) {
+  const parts = [];
+  if (e.reps > 0) parts.push(`${e.reps} reps`);
+  if (e.durationMinutes) parts.push(`in ${fmtDuration(e.durationMinutes)}`);
+  return parts.join(' ');
 }
 
 function csvEscape(val) {
@@ -109,9 +124,11 @@ async function handleUndo(user, say) {
 
   await db.delete(workoutEntries).where(eq(workoutEntries.id, last.id));
 
-  await say(
-    `Deleted: *${ex?.canonicalName ?? 'exercise'}* — ${parseFloat(last.weight)} ${last.unit} × ${last.reps} (${fmtDate(last.performedAt)})`,
-  );
+  const name = ex?.canonicalName ?? 'exercise';
+  const detail = last.entryType === 'challenge'
+    ? fmtChallenge(last)
+    : `${parseFloat(last.weight)} ${last.unit} × ${last.reps}`;
+  await say(`Deleted: *${name}* — ${detail} (${fmtDate(last.performedAt)})`);
 }
 
 async function handleShowHistory(user, parsed, say) {
@@ -156,9 +173,12 @@ async function handleShowHistory(user, parsed, say) {
     return;
   }
 
-  const lines = entries.map(
-    (e) => `• ${fmtDate(e.performedAt)}: ${parseFloat(e.weight)} ${e.unit} × ${e.reps}${e.tempo ? ` @ ${e.tempo}` : ''}`,
-  );
+  const lines = entries.map((e) => {
+    const detail = e.entryType === 'challenge'
+      ? fmtChallenge(e)
+      : `${parseFloat(e.weight)} ${e.unit} × ${e.reps}${e.tempo ? ` @ ${e.tempo}` : ''}`;
+    return `• ${fmtDate(e.performedAt)}: ${detail}`;
+  });
   const header = parsed.lookbackDays
     ? `*${exerciseName}* — past ${parsed.lookbackDays} days (${entries.length} entries):`
     : `*${exerciseName}* — recent entries:`;
@@ -205,6 +225,87 @@ async function handleRecommend(user, parsed, say) {
       `Based on:\n${based}\n\n` +
       `Estimated 1RM: ~*${rec.estimated1RM} ${rec.unit}*`,
   );
+}
+
+async function handleLogChallenge(user, parsed, rawMessage, say) {
+  const resolution = await resolveExercise(parsed.exercise, user.id);
+  const challengeFields = {
+    exercise: parsed.exercise,
+    weight: 0,
+    reps: parsed.totalCount ?? 0,
+    unit: 'count',
+    tempo: null,
+    date: parsed.date,
+    entryType: 'challenge',
+    durationMinutes: parsed.durationMinutes ?? null,
+  };
+  const resultLabel = fmtChallenge({ reps: challengeFields.reps, durationMinutes: challengeFields.durationMinutes });
+
+  if (resolution.action === 'match_existing') {
+    const { exercise } = resolution;
+    await upsertAlias(exercise.id, user.id, parsed.exercise);
+    await saveEntry(user.id, exercise.id, challengeFields, rawMessage);
+    await say(`Logged: *${exercise.canonicalName}* — ${resultLabel}`);
+    return;
+  }
+
+  if (resolution.action === 'create_new') {
+    const exercise = await createExerciseWithAlias(user.id, resolution.canonicalName, parsed.exercise);
+    await saveEntry(user.id, exercise.id, challengeFields, rawMessage);
+    await say(`Logged: *${resolution.canonicalName}* — ${resultLabel}`);
+    return;
+  }
+
+  // ask_user — save pending and show buttons
+  const performedAt = parsed.date ? new Date(parsed.date) : new Date();
+  const [pending] = await db
+    .insert(pendingEntries)
+    .values({
+      userId: user.id,
+      rawMessage,
+      rawExerciseText: parsed.exercise,
+      weight: '0',
+      reps: challengeFields.reps,
+      unit: 'count',
+      tempo: null,
+      entryType: 'challenge',
+      durationMinutes: parsed.durationMinutes != null ? String(parsed.durationMinutes) : null,
+      performedAt,
+      candidateMatches: resolution.candidates.map((c) => ({ id: c.id, name: c.canonicalName })),
+    })
+    .returning();
+
+  const existingButtons = resolution.candidates.map((c) => ({
+    type: 'button',
+    text: { type: 'plain_text', text: c.canonicalName },
+    action_id: 'gym_resolve_existing',
+    value: JSON.stringify({ pendingId: pending.id, exerciseId: c.id }),
+  }));
+
+  const createButton = {
+    type: 'button',
+    text: { type: 'plain_text', text: `New: "${toTitleCase(parsed.exercise)}"` },
+    action_id: 'gym_resolve_create',
+    value: JSON.stringify({ pendingId: pending.id }),
+    style: 'primary',
+  };
+
+  await say({
+    text: `Which exercise is "${parsed.exercise}"?`,
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `Which exercise is *"${parsed.exercise}"*?\n_${resultLabel}_`,
+        },
+      },
+      {
+        type: 'actions',
+        elements: [...existingButtons, createButton],
+      },
+    ],
+  });
 }
 
 async function handleLogLift(user, parsed, rawMessage, say) {
@@ -280,10 +381,12 @@ async function handleExportData(user, message, client, say) {
     .select({
       performedAt: workoutEntries.performedAt,
       exercise: exercises.canonicalName,
+      entryType: workoutEntries.entryType,
       weight: workoutEntries.weight,
       unit: workoutEntries.unit,
       reps: workoutEntries.reps,
       tempo: workoutEntries.tempo,
+      durationMinutes: workoutEntries.durationMinutes,
     })
     .from(workoutEntries)
     .innerJoin(exercises, eq(workoutEntries.exerciseId, exercises.id))
@@ -297,9 +400,12 @@ async function handleExportData(user, message, client, say) {
 
   const rows = entries.map((e) => {
     const date = new Date(e.performedAt).toISOString().split('T')[0];
-    return [date, csvEscape(e.exercise), parseFloat(e.weight), e.unit, e.reps, e.tempo ?? ''].join(',');
+    if (e.entryType === 'challenge') {
+      return [date, csvEscape(e.exercise), 'challenge', '', '', e.reps || '', '', e.durationMinutes ?? ''].join(',');
+    }
+    return [date, csvEscape(e.exercise), 'set', parseFloat(e.weight), e.unit, e.reps, e.tempo ?? '', ''].join(',');
   });
-  const csv = `date,exercise,weight,unit,reps,tempo\n${rows.join('\n')}`;
+  const csv = `date,exercise,entry_type,weight,unit,reps,tempo,duration_minutes\n${rows.join('\n')}`;
 
   await client.filesUploadV2({
     channel_id: message.channel,
@@ -356,14 +462,19 @@ async function handleResolveAction(action, body, respond) {
     reps: pending.reps,
     unit: pending.unit,
     tempo: pending.tempo ?? null,
+    entryType: pending.entryType ?? 'set',
+    durationMinutes: pending.durationMinutes ?? null,
     performedAt: new Date(pending.performedAt),
   });
 
   await db.delete(pendingEntries).where(eq(pendingEntries.id, pendingId));
 
+  const detail = pending.entryType === 'challenge'
+    ? fmtChallenge({ reps: pending.reps, durationMinutes: pending.durationMinutes })
+    : `${parseFloat(pending.weight)} ${pending.unit} × ${pending.reps}${pending.tempo ? ` @ ${pending.tempo}` : ''}`;
   await respond({
     replace_original: true,
-    text: `Logged: *${exerciseName}* — ${parseFloat(pending.weight)} ${pending.unit} × ${pending.reps}${pending.tempo ? ` @ ${pending.tempo}` : ''}`,
+    text: `Logged: *${exerciseName}* — ${detail}`,
   });
 }
 
@@ -385,6 +496,7 @@ export function registerListeners(app) {
     if (parsed.intent === 'show_history') return handleShowHistory(user, parsed, say);
     if (parsed.intent === 'recommend_weight') return handleRecommend(user, parsed, say);
     if (parsed.intent === 'log_lift') return handleLogLift(user, parsed, text, say);
+    if (parsed.intent === 'log_challenge') return handleLogChallenge(user, parsed, text, say);
     if (parsed.intent === 'export_data') return handleExportData(user, message, client, say);
 
     await say(
@@ -392,6 +504,7 @@ export function registerListeners(app) {
         '• `bench press 215x3`\n' +
         '• `what should I bench for 10 reps?`\n' +
         '• `show recent bench` or `show deadlifts over the past year`\n' +
+        '• `82 pushups for 100 pushup challenge` or `100 pushup challenge in 11:30`\n' +
         '• `undo`\n' +
         '• `export my data`',
     );

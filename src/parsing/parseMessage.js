@@ -45,6 +45,15 @@ Intent types and their schemas:
   "intent": "export_data"
 }
 
+"log_challenge" — user logged a challenge result (no weight; total reps, time, or both):
+{
+  "intent": "log_challenge",
+  "exercise": string,
+  "total_count": number | null,
+  "duration_minutes": number | null,
+  "date": "YYYY-MM-DD" | null
+}
+
 "unknown" — none of the above:
 {
   "intent": "unknown"
@@ -69,6 +78,15 @@ Parsing rules:
 - lookback_days is null when no time range is mentioned (show most recent entries).
 - "undo" or "delete last" → undo.
 - "export my data", "download my lifts", "give me a CSV", "export records" → export_data.
+- log_challenge is for workouts where weight is irrelevant: push-up challenges, run/row distances, timed efforts, etc.
+- "82 pushups for 100 pushup challenge" → log_challenge, exercise="100 pushup challenge", total_count=82, duration_minutes=null.
+- "completed 100 pushup challenge in 11:30" → log_challenge, exercise="100 pushup challenge", total_count=100, duration_minutes=11.5.
+- "100 pushup challenge - 75 reps in 12 minutes" → log_challenge, exercise="100 pushup challenge", total_count=75, duration_minutes=12.
+- "2000m row in 7:45" → log_challenge, exercise="2000m row", total_count=null, duration_minutes=7.75.
+- duration_minutes is a decimal number (11:30 → 11.5, 7:45 → 7.75); null when no time is mentioned.
+- total_count is a whole number of reps/meters/etc; null when only time is recorded.
+- At least one of total_count or duration_minutes must be non-null for log_challenge.
+- Use log_lift (not log_challenge) whenever weight is mentioned or clearly implied.
 `;
 
 export async function parseMessage(text, userTimezone = 'UTC') {
@@ -158,6 +176,30 @@ function validate(parsed) {
         typeof parsed.lookback_days === 'number' && parsed.lookback_days > 0
           ? Math.round(parsed.lookback_days)
           : null,
+    };
+  }
+
+  if (intent === 'log_challenge') {
+    if (typeof parsed.exercise !== 'string' || !parsed.exercise.trim()) {
+      return { intent: 'unknown' };
+    }
+    const totalCount =
+      typeof parsed.total_count === 'number' && parsed.total_count > 0 && Number.isInteger(parsed.total_count)
+        ? parsed.total_count
+        : null;
+    const durationMinutes =
+      typeof parsed.duration_minutes === 'number' && parsed.duration_minutes > 0
+        ? parsed.duration_minutes
+        : null;
+    if (totalCount === null && durationMinutes === null) return { intent: 'unknown' };
+    return {
+      intent: 'log_challenge',
+      exercise: parsed.exercise.trim(),
+      totalCount,
+      durationMinutes,
+      date: typeof parsed.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date)
+        ? parsed.date
+        : null,
     };
   }
 
